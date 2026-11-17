@@ -2,6 +2,7 @@ import {
   Building2,
   CalendarDays,
   CheckSquare,
+  ClipboardCheck,
   Database,
   LayoutDashboard,
   Menu,
@@ -10,9 +11,14 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApprovalQueueView } from './components/ApprovalQueueView';
 import { BookingModal, type NewBookingPayload } from './components/BookingModal';
+import {
+  DashboardVerifikator,
+  type PendingPermohonanRow,
+  type SlaUrgency,
+} from './components/DashboardVerifikator';
 import { DashboardView } from './components/DashboardView';
 import { MasterDataView } from './components/MasterDataView';
 import { SchemaExplorerView } from './components/SchemaExplorerView';
@@ -25,6 +31,7 @@ import {
 } from './data/seedData';
 import { transitionPermohonanStatus } from './domain/approval';
 import { detectScheduleConflicts } from './domain/scheduling';
+import { evaluateSlaStatus, formatRemainingSla } from './domain/sla';
 import type {
   AppUser,
   ApprovalAction,
@@ -36,7 +43,7 @@ import type {
   Permohonan,
 } from './types/simpel';
 
-type NavTab = 'dashboard' | 'calendar' | 'approvals' | 'master' | 'schema';
+type NavTab = 'dashboard' | 'verifikator' | 'calendar' | 'approvals' | 'master' | 'schema';
 
 const STORAGE_KEY = 'simpel_pintu_workspace_v1';
 
@@ -76,13 +83,39 @@ function loadWorkspace(): PersistedWorkspace {
 
 const NAV_ITEMS: { id: NavTab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'dashboard', label: 'Dashboard Eksekutif', icon: LayoutDashboard },
+  { id: 'verifikator', label: 'Dashboard Verifikator', icon: ClipboardCheck },
   { id: 'calendar', label: 'Smart Calendar', icon: CalendarDays },
   { id: 'approvals', label: 'Antrean E-Approval', icon: CheckSquare },
   { id: 'master', label: 'Master Ruangan & SDM', icon: Building2 },
   { id: 'schema', label: 'Skema PostgreSQL', icon: Database },
 ];
 
+function formatTanggalJadwal(startIso?: string, endIso?: string): string {
+  if (!startIso || !endIso) return 'Jadwal belum ditentukan';
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  const datePart = start.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const startTime = start.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const endTime = end.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return `${datePart} · ${startTime}–${endTime}`;
+}
+
 export default function App() {
+  const [standaloneVerifikator, setStandaloneVerifikator] = useState<boolean>(() =>
+    typeof window !== 'undefined' && window.location.search.includes('verifikator=1')
+  );
   const [workspace, setWorkspace] = useState<PersistedWorkspace>(() => loadWorkspace());
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [selectedPermohonanId, setSelectedPermohonanId] = useState<string | null>(null);
@@ -109,6 +142,43 @@ export default function App() {
   const pendingApprovalsCount = workspace.permohonan.filter((p) =>
     ['MENUNGGU_VERIFIKASI', 'MENUNGGU_APPROVAL_PIMPINAN'].includes(p.statusApproval)
   ).length;
+
+  const verifikatorPendingRows = useMemo<PendingPermohonanRow[]>(() => {
+    const now = new Date();
+    return workspace.permohonan
+      .filter(
+        (p) =>
+          p.statusApproval === 'MENUNGGU_VERIFIKASI' ||
+          p.statusApproval === 'MENUNGGU_APPROVAL_PIMPINAN'
+      )
+      .map((p) => {
+        const res = workspace.reservations.find((r) => r.permohonanId === p.id);
+        const room = res ? workspace.rooms.find((rm) => rm.id === res.ruanganId) : undefined;
+        const sla = evaluateSlaStatus(p, now);
+        const slaUrgency: SlaUrgency =
+          sla.health === 'TERLEWAT'
+            ? 'overdue'
+            : sla.health === 'WARNING'
+              ? 'approaching'
+              : 'safe';
+
+        return {
+          id: p.id,
+          nomorTiket: p.nomorTiket,
+          namaPemohon: p.pemohonNama,
+          unitKerja: p.unitKerjaNama,
+          judulPelatihan: p.judulPelatihan,
+          ruangan: room?.namaRuangan ?? 'Belum dialokasikan',
+          tanggal: formatTanggalJadwal(res?.waktuMulai, res?.waktuSelesai),
+          slaDeadlineLabel: formatRemainingSla(sla.remainingHours),
+          slaUrgency,
+          statusApproval:
+            p.statusApproval === 'MENUNGGU_APPROVAL_PIMPINAN'
+              ? 'MENUNGGU_APPROVAL_PIMPINAN'
+              : 'MENUNGGU_VERIFIKASI',
+        };
+      });
+  }, [workspace.permohonan, workspace.reservations, workspace.rooms]);
 
   function showToast(msg: string) {
     setBannerMessage(msg);
@@ -297,7 +367,86 @@ export default function App() {
     showToast('Data simulasi dikembalikan ke kondisi awal.');
   }
 
+  async function handleVerifikatorApprove(row: PendingPermohonanRow): Promise<boolean> {
+    const target = workspace.permohonan.find((p) => p.id === row.id);
+    if (!target) return false;
+
+    const action: ApprovalAction =
+      target.statusApproval === 'MENUNGGU_VERIFIKASI' ? 'VERIFY_FORWARD' : 'APPROVE_TTE';
+
+    const actor: AppUser =
+      action === 'VERIFY_FORWARD'
+        ? currentUser.role === 'VERIFIKATOR' || currentUser.role === 'SUPER_ADMIN'
+          ? currentUser
+          : INITIAL_USERS.find((u) => u.role === 'VERIFIKATOR') ?? currentUser
+        : currentUser.role === 'PIMPINAN' || currentUser.role === 'SUPER_ADMIN'
+          ? currentUser
+          : INITIAL_USERS.find((u) => u.role === 'PIMPINAN') ?? currentUser;
+
+    const result = transitionPermohonanStatus(
+      target,
+      workspace.reservations,
+      action,
+      actor,
+      action === 'VERIFY_FORWARD'
+        ? 'Disetujui pada Dashboard Verifikator dan diteruskan ke Pimpinan.'
+        : 'Disetujui & ditandatangani elektronik (TTE) melalui antrean verifikasi.',
+      new Date()
+    );
+
+    if (!result.ok || !result.updatedPermohonan || !result.updatedReservations) {
+      showToast(result.error ?? 'Gagal menyetujui permohonan.');
+      return false;
+    }
+
+    setWorkspace((prev) => ({
+      ...prev,
+      permohonan: prev.permohonan.map((p) =>
+        p.id === row.id ? result.updatedPermohonan! : p
+      ),
+      reservations: result.updatedReservations!,
+      logs: result.newLog ? [...prev.logs, result.newLog] : prev.logs,
+      notifications: result.newNotification
+        ? [result.newNotification, ...prev.notifications]
+        : prev.notifications,
+    }));
+
+    return true;
+  }
+
   const activeNavMeta = NAV_ITEMS.find((n) => n.id === activeTab)!;
+
+  if (standaloneVerifikator) {
+    return (
+      <>
+        <DashboardVerifikator
+          onNavigate={(key) => {
+            if (key === 'booking') {
+              setBookingPrefill(null);
+              setBookingModalOpen(true);
+            } else if (key === 'kalender') {
+              setStandaloneVerifikator(false);
+              setActiveTab('calendar');
+            } else if (key === 'master') {
+              setStandaloneVerifikator(false);
+              setActiveTab('master');
+            }
+          }}
+        />
+        <BookingModal
+          isOpen={bookingModalOpen}
+          currentUser={currentUser}
+          rooms={workspace.rooms}
+          instructors={workspace.instructors}
+          reservations={workspace.reservations}
+          permohonanList={workspace.permohonan}
+          prefill={bookingPrefill}
+          onClose={() => setBookingModalOpen(false)}
+          onSubmitBooking={handleSubmitBooking}
+        />
+      </>
+    );
+  }
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
@@ -475,6 +624,26 @@ export default function App() {
               notifications={workspace.notifications}
               onInspectPermohonan={handleInspectPermohonan}
               onNavigate={(tab) => setActiveTab(tab)}
+            />
+          )}
+
+          {activeTab === 'verifikator' && (
+            <DashboardVerifikator
+              embedded
+              rows={verifikatorPendingRows}
+              onApproveItem={handleVerifikatorApprove}
+              onNavigate={(key) => {
+                if (key === 'booking') {
+                  setBookingPrefill(null);
+                  setBookingModalOpen(true);
+                } else if (key === 'kalender') {
+                  setActiveTab('calendar');
+                } else if (key === 'master') {
+                  setActiveTab('master');
+                } else {
+                  setActiveTab('dashboard');
+                }
+              }}
             />
           )}
 

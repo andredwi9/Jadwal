@@ -1,0 +1,6 @@
+{
+  "name": "SIMPEL PINTU — Manajemen Pelatihan Terpadu",
+  "description": "Sistem Informasi Manajemen Pelatihan Terpadu (1 Pintu) dengan Smart Calendar, Auto-Conflict Detection, SLA Tracking & Escalation, Multi-level E-Approval, dan Arsitektur Skema PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -146,12 +146,12 @@ export function DashboardVerifikator({
       if (onApproveItem) {
         await onApproveItem(row);
       } else {
-        // Simulate PUT /permohonan/{id}/approve API latency
+        // Simulate PUT /api/permohonan/{id}/approve API latency
         await new Promise((resolve) => setTimeout(resolve, 350));
         setLocalRows((prev) => prev.filter((item) => item.id !== row.id));
       }
       setApiFeedback(
-        `PUT /permohonan/${row.id}/approve (200 OK): ${row.nomorTiket} disetujui & diteruskan.`
+        `PUT /api/permohonan/${row.id}/approve (200 OK): ${row.nomorTiket} disetujui & diteruskan.`
       );
     } finally {
       setProcessingId(null);

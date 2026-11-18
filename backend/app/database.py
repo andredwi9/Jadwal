@@ -8,8 +8,16 @@ from sqlalchemy.engine import URL
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
-def build_postgres_url() -> URL:
+def build_postgres_url() -> str | URL:
     """Build a safe SQLAlchemy URL using environment variables (never hardcoded secrets)."""
+    raw_url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+    if raw_url:
+        if raw_url.startswith("postgres://"):
+            return raw_url.replace("postgres://", "postgresql+psycopg://", 1)
+        if raw_url.startswith("postgresql://"):
+            return raw_url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return raw_url
+
     return URL.create(
         drivername="postgresql+psycopg",
         username=os.getenv("SQL_USER", "simpel_app"),
